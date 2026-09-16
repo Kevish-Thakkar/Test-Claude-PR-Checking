@@ -1,0 +1,19 @@
+with:
+  anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  additional_permissions: |
+    actions: read
+
+  prompt: |
+    Review this PR.
+
+    Also inspect the GitHub Actions results.
+
+    Check:
+    - Test failures
+    - Build failures
+    - Lint failures
+    - TypeScript failures
+    - Coverage problems
+
+    Correlate CI failures with the changed code.
