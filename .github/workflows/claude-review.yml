@@ -1,70 +1,113 @@
-- name: Claude PR Review
-  uses: anthropics/claude-code-action@v1
-  with:
-    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+name: Claude PR Review
 
-    claude_args: |
-      --max-turns 20
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
 
-    prompt: |
-      REPO: ${{ github.repository }}
-      PR NUMBER: ${{ github.event.pull_request.number }}
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
 
-      Perform a comprehensive pull request review.
+jobs:
+  claude-review:
+    name: Claude PR Review
+    runs-on: ubuntu-latest
 
-      Use the PR review toolkit and review all applicable aspects:
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 20
 
-      - General code quality
-      - Bugs
-      - Test coverage
-      - Error handling
-      - Type safety
-      - Comments/documentation
-      - Code simplification
+      - name: Claude Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      IMPORTANT:
+          additional_permissions: |
+            actions: read
 
-      Review the actual changes in this PR.
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
 
-      Do not simply summarize the changes.
+            Perform a comprehensive code review of this pull request.
 
-      Identify concrete problems that could affect the
-      correctness, security, reliability, maintainability,
-      or testability of the code.
+            IMPORTANT:
+            Review the actual changes in this PR.
+            Do not simply summarize the changes.
 
-      For test analysis:
+            Check for:
 
-      - Determine what behavior was added or changed.
-      - Determine what tests should exist.
-      - Check whether those tests exist.
-      - Report important missing tests.
-      - Check edge cases and error cases.
+            1. Bugs
+            2. Security vulnerabilities
+            3. Incorrect logic
+            4. Error handling problems
+            5. Null/undefined issues
+            6. Async/Promise problems
+            7. Performance problems
+            8. Maintainability problems
+            9. Code duplication
+            10. Type safety problems
+            11. Missing edge cases
 
-      Report only actionable findings.
+            TEST REVIEW IS REQUIRED.
 
-      For every finding provide:
+            Determine:
 
-      Severity:
-      File:
-      Line:
-      Category:
-      Description:
-      Why it matters:
-      Recommended fix:
+            1. What behavior was added or changed?
+            2. What tests should exist for that behavior?
+            3. Are those tests present?
+            4. Are important edge cases missing?
+            5. Are error cases tested?
+            6. Are regression tests needed?
 
-      At the end provide:
+            If production behavior changed and appropriate tests
+            are missing, report it as a finding.
 
-      ## Final Review
+            Also inspect GitHub Actions results if available.
 
-      Status: PASS or CHANGES_REQUESTED
+            For every finding provide:
 
-      Critical issues:
-      High issues:
-      Medium issues:
-      Low issues:
+            Severity:
+            File:
+            Line:
+            Category:
+            Problem:
+            Why it matters:
+            Recommended fix:
 
-      ## Test Assessment
+            Only report actionable findings.
 
-      Tests found:
-      Missing tests:
-      Coverage concerns:
+            At the end provide:
+
+            ## Claude Review Summary
+
+            Status: PASS or CHANGES_REQUESTED
+
+            Critical:
+            High:
+            Medium:
+            Low:
+
+            ## Test Assessment
+
+            Tests found:
+            Missing tests:
+            Edge cases missing:
+
+            ## CI Assessment
+
+            Tests:
+            Lint:
+            Build:
+
+            ## Final Recommendation
+
+            Explain whether the PR is ready for human review.
