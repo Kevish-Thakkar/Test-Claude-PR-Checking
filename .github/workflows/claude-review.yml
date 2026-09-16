@@ -12,18 +12,20 @@ permissions:
   pull-requests: write
   issues: write
   actions: read
+  id-token: write
 
 jobs:
   claude-review:
+    name: Claude PR Review
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          fetch-depth: 1
+          fetch-depth: 20
 
-      - name: Review PR with Claude
+      - name: Claude Review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -35,35 +37,77 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request thoroughly.
+            Perform a comprehensive code review of this pull request.
 
-            Check:
-            - Bugs
-            - Code quality
-            - Security issues
-            - Error handling
-            - Edge cases
-            - Missing test cases
-            - Test quality
-            - Performance
-            - Maintainability
+            IMPORTANT:
+            Review the actual changes in this PR.
+            Do not simply summarize the changes.
 
-            Review only the changed files.
+            Check for:
 
-            For every issue provide:
-            - Severity
-            - File
-            - Line
-            - Problem
-            - Why it matters
-            - Suggested fix
+            1. Bugs
+            2. Security vulnerabilities
+            3. Incorrect logic
+            4. Error handling problems
+            5. Null/undefined issues
+            6. Async/Promise problems
+            7. Performance problems
+            8. Maintainability problems
+            9. Code duplication
+            10. Type safety problems
+            11. Missing edge cases
 
-            End with:
+            TEST REVIEW IS REQUIRED.
 
-            ## Summary
+            Determine:
+
+            1. What behavior was added or changed?
+            2. What tests should exist for that behavior?
+            3. Are those tests present?
+            4. Are important edge cases missing?
+            5. Are error cases tested?
+            6. Are regression tests needed?
+
+            If production behavior changed and appropriate tests
+            are missing, report it as a finding.
+
+            Also inspect GitHub Actions results if available.
+
+            For every finding provide:
+
+            Severity:
+            File:
+            Line:
+            Category:
+            Problem:
+            Why it matters:
+            Recommended fix:
+
+            Only report actionable findings.
+
+            At the end provide:
+
+            ## Claude Review Summary
 
             Status: PASS or CHANGES_REQUESTED
+
             Critical:
             High:
             Medium:
             Low:
+
+            ## Test Assessment
+
+            Tests found:
+            Missing tests:
+            Edge cases missing:
+
+            ## CI Assessment
+
+            Tests:
+            Lint:
+            Build:
+
+            ## Final Recommendation
+
+            Explain whether the PR is ready for human review.
