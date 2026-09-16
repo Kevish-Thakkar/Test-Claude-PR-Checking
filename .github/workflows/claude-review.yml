@@ -12,6 +12,7 @@ permissions:
   pull-requests: write
   issues: write
   actions: read
+  id-token: write
 
 jobs:
   claude-review:
@@ -32,9 +33,6 @@ jobs:
             actions: read
 
           prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
             Review this pull request thoroughly.
 
             Check:
@@ -48,7 +46,7 @@ jobs:
             - Performance
             - Maintainability
 
-            Review only the changed files.
+            Review the actual changed code.
 
             For every issue provide:
             - Severity
@@ -58,12 +56,18 @@ jobs:
             - Why it matters
             - Suggested fix
 
-            End with:
+            At the end provide:
 
             ## Summary
 
             Status: PASS or CHANGES_REQUESTED
+
             Critical:
             High:
             Medium:
             Low:
+
+            ## Tests
+
+            Explain whether the existing tests adequately cover
+            the changed functionality.
