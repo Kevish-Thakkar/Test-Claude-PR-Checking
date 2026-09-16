@@ -1,19 +1,69 @@
-with:
-  anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+name: Claude PR Review
 
-  additional_permissions: |
-    actions: read
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
 
-  prompt: |
-    Review this PR.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
 
-    Also inspect the GitHub Actions results.
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
 
-    Check:
-    - Test failures
-    - Build failures
-    - Lint failures
-    - TypeScript failures
-    - Coverage problems
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
 
-    Correlate CI failures with the changed code.
+      - name: Review PR with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          additional_permissions: |
+            actions: read
+
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request thoroughly.
+
+            Check:
+            - Bugs
+            - Code quality
+            - Security issues
+            - Error handling
+            - Edge cases
+            - Missing test cases
+            - Test quality
+            - Performance
+            - Maintainability
+
+            Review only the changed files.
+
+            For every issue provide:
+            - Severity
+            - File
+            - Line
+            - Problem
+            - Why it matters
+            - Suggested fix
+
+            End with:
+
+            ## Summary
+
+            Status: PASS or CHANGES_REQUESTED
+            Critical:
+            High:
+            Medium:
+            Low:
