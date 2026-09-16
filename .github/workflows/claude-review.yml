@@ -1,73 +1,70 @@
-name: Claude PR Review
+- name: Claude PR Review
+  uses: anthropics/claude-code-action@v1
+  with:
+    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
-on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
+    claude_args: |
+      --max-turns 20
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  actions: read
-  id-token: write
+    prompt: |
+      REPO: ${{ github.repository }}
+      PR NUMBER: ${{ github.event.pull_request.number }}
 
-jobs:
-  claude-review:
-    runs-on: ubuntu-latest
+      Perform a comprehensive pull request review.
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
+      Use the PR review toolkit and review all applicable aspects:
 
-      - name: Review PR with Claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      - General code quality
+      - Bugs
+      - Test coverage
+      - Error handling
+      - Type safety
+      - Comments/documentation
+      - Code simplification
 
-          additional_permissions: |
-            actions: read
+      IMPORTANT:
 
-          prompt: |
-            Review this pull request thoroughly.
+      Review the actual changes in this PR.
 
-            Check:
-            - Bugs
-            - Code quality
-            - Security issues
-            - Error handling
-            - Edge cases
-            - Missing test cases
-            - Test quality
-            - Performance
-            - Maintainability
+      Do not simply summarize the changes.
 
-            Review the actual changed code.
+      Identify concrete problems that could affect the
+      correctness, security, reliability, maintainability,
+      or testability of the code.
 
-            For every issue provide:
-            - Severity
-            - File
-            - Line
-            - Problem
-            - Why it matters
-            - Suggested fix
+      For test analysis:
 
-            At the end provide:
+      - Determine what behavior was added or changed.
+      - Determine what tests should exist.
+      - Check whether those tests exist.
+      - Report important missing tests.
+      - Check edge cases and error cases.
 
-            ## Summary
+      Report only actionable findings.
 
-            Status: PASS or CHANGES_REQUESTED
+      For every finding provide:
 
-            Critical:
-            High:
-            Medium:
-            Low:
+      Severity:
+      File:
+      Line:
+      Category:
+      Description:
+      Why it matters:
+      Recommended fix:
 
-            ## Tests
+      At the end provide:
 
-            Explain whether the existing tests adequately cover
-            the changed functionality.
+      ## Final Review
+
+      Status: PASS or CHANGES_REQUESTED
+
+      Critical issues:
+      High issues:
+      Medium issues:
+      Low issues:
+
+      ## Test Assessment
+
+      Tests found:
+      Missing tests:
+      Coverage concerns:
