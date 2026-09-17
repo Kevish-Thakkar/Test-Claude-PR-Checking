@@ -24,10 +24,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # --------------------------------------------------
+      # Checkout
+      # --------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      # --------------------------------------------------
+      # Node.js
+      # --------------------------------------------------
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -35,21 +43,94 @@ jobs:
           node-version: 24
           cache: npm
 
+      # --------------------------------------------------
+      # Java 21
+      # Required when JRE provisioning is disabled
+      # --------------------------------------------------
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # --------------------------------------------------
+      # Verify Java
+      # --------------------------------------------------
+
+      - name: Verify Java
+        run: |
+          java -version
+          echo "JAVA_HOME=$JAVA_HOME"
+
+      # --------------------------------------------------
+      # Install dependencies
+      # --------------------------------------------------
+
       - name: Install dependencies
         run: npm ci
+
+      # --------------------------------------------------
+      # Run tests + coverage
+      # --------------------------------------------------
 
       - name: Run tests with coverage
         run: npm run test
 
+      # --------------------------------------------------
+      # Verify coverage file
+      # --------------------------------------------------
+
+      - name: Verify coverage
+        run: |
+          echo "Checking coverage directory..."
+
+          if [ -d "coverage" ]; then
+            ls -la coverage
+          else
+            echo "WARNING: coverage directory does not exist"
+          fi
+
+          if [ -f "coverage/lcov.info" ]; then
+            echo "✅ coverage/lcov.info found"
+          else
+            echo "⚠️ coverage/lcov.info NOT found"
+          fi
+
+      # --------------------------------------------------
+      # SonarQube Scan
+      # --------------------------------------------------
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v7
+        with:
+          args: >
+            -Dsonar.scanner.skipJreProvisioning=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
+      # --------------------------------------------------
+      # Quality Gate
+      # --------------------------------------------------
+
       - name: SonarQube Quality Gate
+        id: quality-gate
         uses: SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # --------------------------------------------------
+      # Display Quality Gate result
+      # --------------------------------------------------
+
+      - name: Quality Gate Result
+        if: always()
+        run: |
+          echo "======================================"
+          echo "SonarQube Quality Gate"
+          echo "======================================"
+          echo "Status: ${{ steps.quality-gate.outputs.quality-gate-status }}"
+          echo "======================================"
