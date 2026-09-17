@@ -17,5 +17,9 @@
   "bugs": {
     "url": "https://github.com/Kevish-Thakkar/Test-Claude-PR-Checking/issues"
   },
-  "homepage": "https://github.com/Kevish-Thakkar/Test-Claude-PR-Checking#readme"
+  "homepage": "https://github.com/Kevish-Thakkar/Test-Claude-PR-Checking#readme",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  }
 }
