@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --coverage"
+    "test": "node --test --experimental-test-coverage"
   },
   "repository": {
     "type": "git",
