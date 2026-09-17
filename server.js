@@ -1614,7 +1614,7 @@ app.post(
   (req, res) => {
     console.log("\n=================================");
 
-    console.log("GitHub Webhook Received");
+    console.log("GitHub Webhook Received", new Date().toISOString());
 
     console.log("=================================");
 
