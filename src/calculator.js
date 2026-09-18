@@ -20,5 +20,4 @@ module.exports = {
   divide,
   multiply,
   power,
-  square,
 };
