@@ -15,9 +15,6 @@ function power(a, b) {
 }
 // console.log(user.id);
 
-function square(a) {
-  return a * a;
-}
 module.exports = {
   add,
   divide,
