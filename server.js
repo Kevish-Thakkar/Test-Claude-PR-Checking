@@ -1187,48 +1187,24 @@ require("dotenv").config();
 
 const express = require("express");
 const crypto = require("crypto");
+const { connectMongo } = require("./src/db/connect");
+const {
+  Branch,
+  PullRequest,
+  Comment,
+  Review,
+  QualityGate,
+  WebhookEvent,
+} = require("./src/models");
+const {
+  resetStores,
+  logWebhookEvent,
+  markWebhookProcessed,
+  resolveBranchForQualityGate,
+  applyQualityGateToBranch,
+} = require("./src/services/persistence");
 
 const app = express();
-
-/*
-|--------------------------------------------------------------------------
-| Configuration
-|--------------------------------------------------------------------------
-*/
-
-const PORT = process.env.PORT || 3000;
-
-const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
-
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-
-const SONAR_URL = process.env.SONAR_URL || "http://localhost:9000";
-
-const SONAR_TOKEN = process.env.SONAR_TOKEN;
-
-/*
-|--------------------------------------------------------------------------
-| Temporary In-Memory Storage
-|--------------------------------------------------------------------------
-|
-| Replace these with PostgreSQL tables in Nexus.
-|
-*/
-
-// Branches created by Nexus
-const nexusBranches = [];
-
-// GitHub PR → Nexus Task mapping
-const githubPullRequests = [];
-
-// Claude inline review comments
-const claudeComments = [];
-
-// Claude complete reviews
-const claudeReviews = [];
-
-// SonarQube quality gate reports
-const sonarReports = [];
 
 /*
 |--------------------------------------------------------------------------
@@ -1247,7 +1223,9 @@ function generateId() {
 */
 
 function verifyGitHubSignature(payload, signature) {
-  if (!GITHUB_WEBHOOK_SECRET) {
+  const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
     console.log("❌ GITHUB_WEBHOOK_SECRET is not configured");
 
     return false;
@@ -1262,7 +1240,7 @@ function verifyGitHubSignature(payload, signature) {
   const expectedSignature =
     "sha256=" +
     crypto
-      .createHmac("sha256", GITHUB_WEBHOOK_SECRET)
+      .createHmac("sha256", webhookSecret)
       .update(payload)
       .digest("hex");
 
@@ -1283,7 +1261,9 @@ function verifyGitHubSignature(payload, signature) {
 */
 
 async function githubRequest(url, options = {}) {
-  if (!GITHUB_TOKEN) {
+  const githubToken = process.env.GITHUB_TOKEN;
+
+  if (!githubToken) {
     throw new Error("GITHUB_TOKEN is not configured");
   }
 
@@ -1291,7 +1271,7 @@ async function githubRequest(url, options = {}) {
     ...options,
 
     headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Authorization: `Bearer ${githubToken}`,
 
       Accept: "application/vnd.github+json",
 
@@ -1329,15 +1309,18 @@ async function githubRequest(url, options = {}) {
  */
 
 async function getSonarQualityGate(projectKey) {
-  if (!SONAR_TOKEN) {
+  const sonarToken = process.env.SONAR_TOKEN;
+  const sonarUrl = process.env.SONAR_URL || "http://localhost:9000";
+
+  if (!sonarToken) {
     throw new Error("SONAR_TOKEN is not configured");
   }
 
   const url =
-    `${SONAR_URL}/api/qualitygates/project_status` +
+    `${sonarUrl}/api/qualitygates/project_status` +
     `?projectKey=${encodeURIComponent(projectKey)}`;
 
-  const auth = Buffer.from(`${SONAR_TOKEN}:`).toString("base64");
+  const auth = Buffer.from(`${sonarToken}:`).toString("base64");
 
   const response = await fetch(url, {
     method: "GET",
@@ -1410,8 +1393,17 @@ app.post(
 
     console.log("=================================");
 
+    let webhookEvent = null;
+
     try {
       const payload = req.body;
+
+      webhookEvent = await logWebhookEvent({
+        source: "sonarqube",
+        eventType: "qualitygate",
+        deliveryId: payload.analysisId || null,
+        payload,
+      });
 
       console.log("\n========== SONAR PAYLOAD ==========");
 
@@ -1429,6 +1421,8 @@ app.post(
 
       const analysisId = payload.analysisId;
 
+      const revision = payload.revision || null;
+
       const webhookStatus = payload.status;
 
       const webhookQualityGateStatus = payload.qualityGate?.status;
@@ -1441,6 +1435,10 @@ app.post(
 
       if (!projectKey) {
         console.log("❌ Project key missing");
+
+        if (webhookEvent) {
+          await markWebhookProcessed(webhookEvent.id, "Project key missing");
+        }
 
         return res.status(400).json({
           success: false,
@@ -1456,6 +1454,8 @@ app.post(
       console.log("Project Name:", projectName);
 
       console.log("Analysis ID:", analysisId);
+
+      console.log("Revision:", revision);
 
       console.log("Webhook Status:", webhookStatus);
 
@@ -1507,54 +1507,51 @@ app.post(
 
       /*
       |--------------------------------------------------------------------------
-      | IMPORTANT
-      |--------------------------------------------------------------------------
-      |
-      | At this point SonarQube tells us:
-      |
-      | Project
-      | Analysis
-      | Quality Gate
-      |
-      | But SonarQube does NOT directly know
-      | which Nexus task owns this result.
-      |
-      | The actual Nexus association is done through:
-      |
-      | GitHub PR ID → Nexus Task
-      |
+      | Correlate revision (Sonar) with branch headSha (GitHub PR sync/open)
       |--------------------------------------------------------------------------
       */
 
-      const sonarReport = {
-        id: generateId(),
+      const passed = qualityGateStatus === "OK";
 
-        projectKey,
+      let matchedBranch = null;
 
-        projectName,
+      if (revision) {
+        const resolved = await resolveBranchForQualityGate({
+          commitSha: revision,
+          revision,
+        });
+        matchedBranch = resolved.branch;
+      }
 
-        analysisId,
-
-        qualityGateStatus,
-
-        conditions: conditions.map((condition) => ({
-          metric: condition.metricKey,
-
-          status: condition.status,
-
-          actualValue: condition.actualValue ?? null,
-
-          threshold: condition.errorThreshold ?? null,
-
-          operator: condition.comparator ?? condition.operator ?? null,
-        })),
-
+      const qualityReport = await QualityGate.create({
+        taskId: matchedBranch?.taskId || "unmapped",
+        branchId: matchedBranch?.id || "unmapped",
+        githubRepositoryId: matchedBranch?.githubRepositoryId || null,
+        githubPrId: null,
+        commitSha: revision,
+        revision,
+        sonarProjectKey: projectKey,
+        sonarAnalysisId: analysisId || null,
+        status: qualityGateStatus || "ERROR",
+        passed,
+        failed: !passed,
         failedConditions,
+        source: "webhook",
+      });
 
-        createdAt: new Date().toISOString(),
-      };
+      if (matchedBranch) {
+        await applyQualityGateToBranch(matchedBranch, qualityReport);
+        console.log(
+          "✅ Quality Gate linked to branch:",
+          matchedBranch.branchName,
+        );
+      } else {
+        console.log("⚠️ No branch matched Sonar revision:", revision);
+      }
 
-      sonarReports.push(sonarReport);
+      if (webhookEvent) {
+        await markWebhookProcessed(webhookEvent.id);
+      }
 
       /*
       |--------------------------------------------------------------------------
@@ -1569,12 +1566,16 @@ app.post(
 
         analysisId,
 
+        revision,
+
+        branchId: matchedBranch?.id || null,
+
         qualityGate: {
           status: qualityGateStatus,
 
-          passed: qualityGateStatus === "OK",
+          passed,
 
-          failed: qualityGateStatus !== "OK",
+          failed: !passed,
 
           failedConditions,
         },
@@ -1583,6 +1584,10 @@ app.post(
       console.error("\n❌ SonarQube webhook error:");
 
       console.error(error);
+
+      if (webhookEvent) {
+        await markWebhookProcessed(webhookEvent.id, error.message);
+      }
 
       return res.status(500).json({
         success: false,
@@ -1611,7 +1616,7 @@ app.post(
     type: "application/json",
   }),
 
-  (req, res) => {
+  async (req, res) => {
     console.log("\n=================================");
 
     console.log("GitHub Webhook Received", new Date().toISOString());
@@ -1666,44 +1671,63 @@ app.post(
       });
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Route event
-    |--------------------------------------------------------------------------
-    */
-
-    switch (event) {
-      case "pull_request":
-        handlePullRequest(payload);
-        break;
-
-      case "pull_request_review_comment":
-        handleReviewComment(payload);
-        break;
-
-      case "pull_request_review":
-        handlePullRequestReview(payload);
-        break;
-
-      case "issue_comment":
-        handleIssueComment(payload);
-        break;
-
-      default:
-        console.log("Event ignored:", event);
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Respond
-    |--------------------------------------------------------------------------
-    */
-
-    return res.status(200).json({
-      success: true,
-
-      received: true,
+    const webhookEvent = await logWebhookEvent({
+      source: "github",
+      eventType: event,
+      deliveryId: deliveryId || null,
+      payload,
     });
+
+    try {
+      /*
+      |--------------------------------------------------------------------------
+      | Route event
+      |--------------------------------------------------------------------------
+      */
+
+      switch (event) {
+        case "pull_request":
+          await handlePullRequest(payload);
+          break;
+
+        case "pull_request_review_comment":
+          await handleReviewComment(payload);
+          break;
+
+        case "pull_request_review":
+          await handlePullRequestReview(payload);
+          break;
+
+        case "issue_comment":
+          await handleIssueComment(payload);
+          break;
+
+        default:
+          console.log("Event ignored:", event);
+      }
+
+      await markWebhookProcessed(webhookEvent.id);
+
+      /*
+      |--------------------------------------------------------------------------
+      | Respond
+      |--------------------------------------------------------------------------
+      */
+
+      return res.status(200).json({
+        success: true,
+
+        received: true,
+      });
+    } catch (error) {
+      console.error("❌ GitHub webhook handler failed:", error);
+      await markWebhookProcessed(webhookEvent.id, error.message);
+
+      return res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
   },
 );
 
@@ -1713,7 +1737,7 @@ app.post(
 |--------------------------------------------------------------------------
 */
 
-function handlePullRequest(payload) {
+async function handlePullRequest(payload) {
   const action = payload.action;
 
   const repository = payload.repository;
@@ -1758,11 +1782,10 @@ function handlePullRequest(payload) {
   |--------------------------------------------------------------------------
   */
 
-  const nexusBranch = nexusBranches.find(
-    (branch) =>
-      branch.githubRepositoryId === repositoryId &&
-      branch.branchName === branchName,
-  );
+  const nexusBranch = await Branch.findOne({
+    githubRepositoryId: repositoryId,
+    branchName,
+  });
 
   if (!nexusBranch) {
     console.log("⚠️ No Nexus task found for branch:", branchName);
@@ -1772,25 +1795,28 @@ function handlePullRequest(payload) {
 
   console.log("✅ Nexus Task found:", nexusBranch.taskId);
 
+  // Keep branch.headSha in sync with PR opened / synchronize (matches Sonar revision)
+  if (headSha) {
+    nexusBranch.headSha = headSha;
+    await nexusBranch.save();
+  }
+
   /*
   |--------------------------------------------------------------------------
   | Check existing PR mapping
   |--------------------------------------------------------------------------
   */
 
-  const existingPr = githubPullRequests.find(
-    (item) =>
-      item.githubRepositoryId === repositoryId && item.githubPrId === prId,
-  );
+  const existingPr = await PullRequest.findOne({
+    githubRepositoryId: repositoryId,
+    githubPrId: prId,
+  });
 
   if (existingPr) {
-    existingPr.prNumber = prNumber;
-
+    existingPr.githubPrNumber = prNumber;
     existingPr.branchName = branchName;
-
     existingPr.headSha = headSha;
-
-    existingPr.updatedAt = new Date().toISOString();
+    await existingPr.save();
 
     console.log("🔄 PR mapping updated");
 
@@ -1803,35 +1829,20 @@ function handlePullRequest(payload) {
   |--------------------------------------------------------------------------
   */
 
-  const prMapping = {
-    id: generateId(),
-
+  const prMapping = await PullRequest.create({
     githubRepositoryId: repositoryId,
-
     githubPrId: prId,
-
     githubPrNumber: prNumber,
-
     taskId: nexusBranch.taskId,
-
     branchId: nexusBranch.id,
-
     branchName,
-
     headSha,
-
     prUrl: pr.html_url,
-
-    createdAt: new Date().toISOString(),
-
-    updatedAt: new Date().toISOString(),
-  };
-
-  githubPullRequests.push(prMapping);
+  });
 
   console.log("\n✅ PR mapped to Nexus task");
 
-  console.log(prMapping);
+  console.log(prMapping.toObject());
 }
 
 /*
@@ -1840,7 +1851,7 @@ function handlePullRequest(payload) {
 |--------------------------------------------------------------------------
 */
 
-function handleReviewComment(payload) {
+async function handleReviewComment(payload) {
   const action = payload.action;
 
   if (action !== "created") {
@@ -1884,10 +1895,10 @@ function handleReviewComment(payload) {
   |
   */
 
-  const prMapping = githubPullRequests.find(
-    (item) =>
-      item.githubRepositoryId === repository.id && item.githubPrId === pr.id,
-  );
+  const prMapping = await PullRequest.findOne({
+    githubRepositoryId: repository.id,
+    githubPrId: pr.id,
+  }).lean();
 
   if (!prMapping) {
     console.log("⚠️ PR is not mapped to Nexus task");
@@ -1899,41 +1910,26 @@ function handleReviewComment(payload) {
 
   /*
   |--------------------------------------------------------------------------
-  | Store Claude comment
+  | Store Claude comment on the branch
   |--------------------------------------------------------------------------
   */
 
-  const claudeComment = {
-    id: generateId(),
-
+  const claudeComment = await Comment.create({
     taskId: prMapping.taskId,
-
     branchId: prMapping.branchId,
-
     githubRepositoryId: repository.id,
-
     githubPrId: pr.id,
-
     githubPrNumber: pr.number,
-
     githubCommentId: comment.id,
-
     author: comment.user?.login,
-
     filePath: comment.path,
-
     line: comment.line,
-
     body: comment.body,
-
-    createdAt: new Date().toISOString(),
-  };
-
-  claudeComments.push(claudeComment);
+  });
 
   console.log("\n✅ Claude finding stored");
 
-  console.log(claudeComment);
+  console.log(claudeComment.toObject());
 }
 
 /*
@@ -1942,7 +1938,7 @@ function handleReviewComment(payload) {
 |--------------------------------------------------------------------------
 */
 
-function handlePullRequestReview(payload) {
+async function handlePullRequestReview(payload) {
   const action = payload.action;
 
   if (action !== "submitted") {
@@ -1981,10 +1977,10 @@ function handlePullRequestReview(payload) {
   |--------------------------------------------------------------------------
   */
 
-  const prMapping = githubPullRequests.find(
-    (item) =>
-      item.githubRepositoryId === repository.id && item.githubPrId === pr.id,
-  );
+  const prMapping = await PullRequest.findOne({
+    githubRepositoryId: repository.id,
+    githubPrId: pr.id,
+  }).lean();
 
   if (!prMapping) {
     console.log("⚠️ PR is not mapped to Nexus task");
@@ -1998,37 +1994,22 @@ function handlePullRequestReview(payload) {
   |--------------------------------------------------------------------------
   */
 
-  const claudeReview = {
-    id: generateId(),
-
+  const claudeReview = await Review.create({
     taskId: prMapping.taskId,
-
     branchId: prMapping.branchId,
-
     githubRepositoryId: repository.id,
-
     githubPrId: pr.id,
-
     githubPrNumber: pr.number,
-
     githubReviewId: review.id,
-
     reviewer: review.user?.login,
-
     reviewState: review.state,
-
     reviewBody: review.body,
-
-    submittedAt: review.submitted_at,
-
-    createdAt: new Date().toISOString(),
-  };
-
-  claudeReviews.push(claudeReview);
+    submittedAt: review.submitted_at || null,
+  });
 
   console.log("\n✅ Claude PR review stored");
 
-  console.log(claudeReview);
+  console.log(claudeReview.toObject());
 }
 
 /*
@@ -2037,7 +2018,7 @@ function handlePullRequestReview(payload) {
 |--------------------------------------------------------------------------
 */
 
-function handleIssueComment(payload) {
+async function handleIssueComment(payload) {
   const issue = payload.issue;
 
   /*
@@ -2102,7 +2083,7 @@ app.post(
         });
       }
 
-      if (!GITHUB_TOKEN) {
+      if (!process.env.GITHUB_TOKEN) {
         return res.status(500).json({
           success: false,
 
@@ -2176,31 +2157,19 @@ app.post(
 
       /*
       |--------------------------------------------------------------------------
-      | Create Nexus branch mapping
+      | Create Nexus branch mapping in MongoDB
       |--------------------------------------------------------------------------
       */
 
-      const branch = {
-        id: generateId(),
-
+      const branch = await Branch.create({
         taskId,
-
         githubRepositoryId: repository.id,
-
         owner,
-
         repo,
-
         branchName,
-
         baseSha,
-
-        createdAt: new Date().toISOString(),
-
-        updatedAt: new Date().toISOString(),
-      };
-
-      nexusBranches.push(branch);
+        headSha: baseSha,
+      });
 
       console.log("\n======= BRANCH CREATED =======");
 
@@ -2220,10 +2189,8 @@ app.post(
         success: true,
 
         branch: {
-          ...branch,
-
+          ...branch.toObject(),
           githubRef: createdBranch.ref,
-
           githubObjectSha: createdBranch.object.sha,
         },
       });
@@ -2278,11 +2245,15 @@ app.post(
         githubRepositoryId,
         githubPrId,
         commitSha,
+        revision,
         sonarProjectKey,
         sonarAnalysisId,
+        sonarTaskId,
         status,
         failedConditions = [],
       } = req.body;
+
+      const sha = commitSha || revision || null;
 
       console.log("\n=================================");
 
@@ -2294,7 +2265,7 @@ app.post(
 
       console.log("PR ID:", githubPrId);
 
-      console.log("Commit SHA:", commitSha);
+      console.log("Commit SHA / revision:", sha);
 
       console.log("Sonar Project:", sonarProjectKey);
 
@@ -2304,138 +2275,108 @@ app.post(
 
       /*
       |--------------------------------------------------------------------------
-      | Validate
+      | Validate — need repo + (PR id or commit SHA/revision)
       |--------------------------------------------------------------------------
       */
 
-      if (!githubRepositoryId || !githubPrId) {
+      if (!githubRepositoryId || (!githubPrId && !sha)) {
         return res.status(400).json({
           success: false,
 
-          message: "githubRepositoryId and githubPrId are required",
+          message:
+            "githubRepositoryId and either githubPrId or commitSha/revision are required",
         });
       }
 
       /*
       |--------------------------------------------------------------------------
-      | Find PR mapping
+      | Correlate:
+      | 1) GitHub PR ID → PullRequest → Branch
+      | 2) commitSha/revision === Branch.headSha (from PR opened/synchronize)
       |--------------------------------------------------------------------------
-      |
-      | This is the critical correlation.
-      |
-      | GitHub PR ID
-      |       ↓
-      | Nexus PR mapping
-      |       ↓
-      | Nexus Task ID
-      |
       */
 
-      const prMapping = githubPullRequests.find(
-        (pr) =>
-          pr.githubRepositoryId === githubRepositoryId &&
-          pr.githubPrId === githubPrId,
-      );
+      const { branch, pr, matchedBy } = await resolveBranchForQualityGate({
+        githubRepositoryId,
+        githubPrId,
+        commitSha: sha,
+        revision: sha,
+      });
 
-      if (!prMapping) {
-        console.log("❌ PR is not mapped to a Nexus task");
+      if (!branch) {
+        console.log("❌ Could not map Quality Gate to a Nexus branch");
 
         return res.status(404).json({
           success: false,
 
-          message: "GitHub PR is not mapped to a Nexus task",
+          message: "No Nexus branch found for PR id or commit SHA/revision",
 
           githubRepositoryId,
 
-          githubPrId,
+          githubPrId: githubPrId || null,
+
+          commitSha: sha,
         });
       }
 
-      /*
-      |--------------------------------------------------------------------------
-      | Task found
-      |--------------------------------------------------------------------------
-      */
+      console.log("\n✅ QUALITY GATE → NEXUS BRANCH");
 
-      const taskId = prMapping.taskId;
+      console.log("Matched by:", matchedBy);
 
-      const branchId = prMapping.branchId;
+      console.log("Task ID:", branch.taskId);
 
-      console.log("\n✅ QUALITY GATE → NEXUS TASK");
+      console.log("Branch ID:", branch.id);
 
-      console.log("Task ID:", taskId);
+      console.log("Branch:", branch.branchName);
 
-      console.log("Branch ID:", branchId);
+      const passed = status === "OK";
 
-      console.log("PR ID:", githubPrId);
-
-      /*
-      |--------------------------------------------------------------------------
-      | Create Nexus Quality Report
-      |--------------------------------------------------------------------------
-      */
-
-      const qualityReport = {
-        id: generateId(),
-
-        taskId,
-
-        branchId,
-
+      const qualityReport = await QualityGate.create({
+        taskId: branch.taskId,
+        branchId: branch.id,
         githubRepositoryId,
-
-        githubPrId,
-
-        commitSha: commitSha || null,
-
+        githubPrId: githubPrId || pr?.githubPrId || null,
+        commitSha: sha,
+        revision: sha,
         sonarProjectKey: sonarProjectKey || null,
-
         sonarAnalysisId: sonarAnalysisId || null,
-
+        sonarTaskId: sonarTaskId || null,
         status,
-
-        passed: status === "OK",
-
-        failed: status !== "OK",
-
+        passed,
+        failed: !passed,
         failedConditions,
+        source: "ci",
+      });
 
-        createdAt: new Date().toISOString(),
-      };
-
-      /*
-      |--------------------------------------------------------------------------
-      | Store
-      |--------------------------------------------------------------------------
-      */
-
-      sonarReports.push(qualityReport);
-
-      /*
-      |--------------------------------------------------------------------------
-      | Response
-      |--------------------------------------------------------------------------
-      */
+      await applyQualityGateToBranch(branch, qualityReport);
 
       return res.status(201).json({
         success: true,
 
-        message: "Quality Gate mapped to Nexus task",
+        message: "Quality Gate mapped to Nexus branch",
+
+        matchedBy,
 
         task: {
-          taskId,
+          taskId: branch.taskId,
 
-          branchId,
+          branchId: branch.id,
 
-          githubPrId,
+          branchName: branch.branchName,
+
+          githubPrId: githubPrId || pr?.githubPrId || null,
+
+          commitSha: sha,
 
           status,
 
-          passed: status === "OK",
+          passed,
 
-          failed: status !== "OK",
+          failed: !passed,
 
           failedConditions,
+
+          latestQualityGatePassed: branch.latestQualityGatePassed,
         },
       });
     } catch (error) {
@@ -2454,28 +2395,96 @@ app.post(
 
 /*
 |--------------------------------------------------------------------------
+| Check Quality Gate for a branch
+|--------------------------------------------------------------------------
+*/
+
+app.get("/nexus/branches/:branchId/quality-gate", async (req, res) => {
+  try {
+    const branch = await Branch.findOne({ id: req.params.branchId }).lean();
+
+    if (!branch) {
+      return res.status(404).json({
+        success: false,
+        message: "Branch not found",
+      });
+    }
+
+    const history = await QualityGate.find({ branchId: branch.id })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({
+      success: true,
+      branch: {
+        id: branch.id,
+        taskId: branch.taskId,
+        branchName: branch.branchName,
+        headSha: branch.headSha,
+        latestQualityGateStatus: branch.latestQualityGateStatus,
+        latestQualityGatePassed: branch.latestQualityGatePassed,
+        latestQualityGateAt: branch.latestQualityGateAt,
+      },
+      passed: branch.latestQualityGatePassed === true,
+      history,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
+| Branch comments
+|--------------------------------------------------------------------------
+*/
+
+app.get("/nexus/branches/:branchId/comments", async (req, res) => {
+  try {
+    const comments = await Comment.find({ branchId: req.params.branchId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({ success: true, comments });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
 | Debug APIs
 |--------------------------------------------------------------------------
 */
 
-app.get("/debug/branches", (req, res) => {
-  res.json(nexusBranches);
+app.get("/debug/branches", async (req, res) => {
+  res.json(await Branch.find().lean());
 });
 
-app.get("/debug/prs", (req, res) => {
-  res.json(githubPullRequests);
+app.get("/debug/prs", async (req, res) => {
+  res.json(await PullRequest.find().lean());
 });
 
-app.get("/debug/comments", (req, res) => {
-  res.json(claudeComments);
+app.get("/debug/comments", async (req, res) => {
+  res.json(await Comment.find().lean());
 });
 
-app.get("/debug/reviews", (req, res) => {
-  res.json(claudeReviews);
+app.get("/debug/reviews", async (req, res) => {
+  res.json(await Review.find().lean());
 });
 
-app.get("/debug/sonar", (req, res) => {
-  res.json(sonarReports);
+app.get("/debug/sonar", async (req, res) => {
+  res.json(await QualityGate.find().lean());
+});
+
+app.get("/debug/webhooks", async (req, res) => {
+  res.json(await WebhookEvent.find().sort({ createdAt: -1 }).limit(100).lean());
 });
 
 /*
@@ -2490,13 +2499,15 @@ app.get("/", (req, res) => {
 
     service: "Nexus GitHub + SonarQube Gateway",
 
-    sonarUrl: SONAR_URL,
+    sonarUrl: process.env.SONAR_URL || "http://localhost:9000",
 
-    githubWebhookConfigured: Boolean(GITHUB_WEBHOOK_SECRET),
+    mongodbConfigured: Boolean(process.env.MONGODB_URI),
 
-    githubTokenConfigured: Boolean(GITHUB_TOKEN),
+    githubWebhookConfigured: Boolean(process.env.GITHUB_WEBHOOK_SECRET),
 
-    sonarTokenConfigured: Boolean(SONAR_TOKEN),
+    githubTokenConfigured: Boolean(process.env.GITHUB_TOKEN),
+
+    sonarTokenConfigured: Boolean(process.env.SONAR_TOKEN),
   });
 });
 
@@ -2506,14 +2517,79 @@ app.get("/", (req, res) => {
 |--------------------------------------------------------------------------
 */
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+function resolveListenPort(port) {
+  if (port !== undefined) {
+    return port;
+  }
 
-  console.log("GitHub webhook secret:", Boolean(GITHUB_WEBHOOK_SECRET));
+  if (process.env.PORT !== undefined && process.env.PORT !== "") {
+    return Number(process.env.PORT);
+  }
 
-  console.log("GitHub token:", Boolean(GITHUB_TOKEN));
+  return 3000;
+}
 
-  console.log("SonarQube URL:", SONAR_URL);
+function startServer(port) {
+  const resolvedPort = resolveListenPort(port);
 
-  console.log("SonarQube token:", Boolean(SONAR_TOKEN));
-});
+  const server = app.listen(resolvedPort, () => {
+    const boundPort = server.address().port;
+
+    console.log(`🚀 Server running on http://localhost:${boundPort}`);
+
+    console.log(
+      "GitHub webhook secret:",
+      Boolean(process.env.GITHUB_WEBHOOK_SECRET),
+    );
+
+    console.log("GitHub token:", Boolean(process.env.GITHUB_TOKEN));
+
+    console.log(
+      "SonarQube URL:",
+      process.env.SONAR_URL || "http://localhost:9000",
+    );
+
+    console.log("SonarQube token:", Boolean(process.env.SONAR_TOKEN));
+  });
+
+  return server;
+}
+
+async function boot(port) {
+  await connectMongo();
+  return startServer(port);
+}
+
+module.exports = {
+  app,
+  startServer,
+  boot,
+  resolveListenPort,
+  resetStores,
+  generateId,
+  verifyGitHubSignature,
+  githubRequest,
+  getSonarQualityGate,
+  extractFailedConditions,
+  handlePullRequest,
+  handleReviewComment,
+  handlePullRequestReview,
+  handleIssueComment,
+  resolveBranchForQualityGate,
+  applyQualityGateToBranch,
+  Branch,
+  PullRequest,
+  Comment,
+  Review,
+  QualityGate,
+  WebhookEvent,
+};
+
+/* c8 ignore start */
+if (require.main === module) {
+  boot().catch((error) => {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  });
+}
+/* c8 ignore stop */
