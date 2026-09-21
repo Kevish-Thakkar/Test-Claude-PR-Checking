@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { add, divide } = require("../src/calculator");
+const { add, divide, multiply } = require("../src/calculator");
 
 test("add positive integers", () => {
   assert.strictEqual(add(2, 3), 5);
@@ -40,4 +40,24 @@ test("divide by zero yields Infinity", () => {
 
 test("divide zero by number", () => {
   assert.strictEqual(divide(0, 5), 0);
+});
+
+test("multiply positive integers", () => {
+  assert.strictEqual(multiply(4, 5), 20);
+});
+
+test("multiply by zero", () => {
+  assert.strictEqual(multiply(7, 0), 0);
+});
+
+test("multiply negative numbers", () => {
+  assert.strictEqual(multiply(-3, -4), 12);
+});
+
+test("multiply mixed sign numbers", () => {
+  assert.strictEqual(multiply(-3, 4), -12);
+});
+
+test("multiply decimals", () => {
+  assert.strictEqual(multiply(2.5, 4), 10);
 });
