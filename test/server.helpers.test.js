@@ -139,6 +139,18 @@ test("extractFailedConditions maps ERROR conditions", () => {
     ],
   });
   assert.strictEqual(comparatorOnly[0].operator, "GT");
+
+  const neitherOperator = extractFailedConditions({
+    conditions: [
+      {
+        status: "ERROR",
+        metricKey: "complexity",
+      },
+    ],
+  });
+  assert.strictEqual(neitherOperator[0].operator, null);
+  assert.strictEqual(neitherOperator[0].actualValue, null);
+  assert.strictEqual(neitherOperator[0].threshold, null);
 });
 
 test("getSonarQualityGate uses default SONAR_URL when unset", async () => {

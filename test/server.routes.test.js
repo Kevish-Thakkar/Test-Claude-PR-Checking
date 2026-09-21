@@ -587,6 +587,47 @@ test("POST /nexus/quality-gate defaults empty status to ERROR", async () => {
   }
 });
 
+test("POST /nexus/quality-gate coerces non-array failedConditions to []", async () => {
+  const branch = await Branch.create({
+    taskId: "T-FC",
+    githubRepositoryId: 5055,
+    owner: "o",
+    repo: "r",
+    branchName: "feature/fc",
+    headSha: "fc-sha",
+  });
+  await PullRequest.create({
+    githubRepositoryId: 5055,
+    githubPrId: 505505,
+    githubPrNumber: 55,
+    taskId: branch.taskId,
+    branchId: branch.id,
+    branchName: branch.branchName,
+    headSha: "fc-sha",
+  });
+
+  const ctx = await startTestServer(app);
+  try {
+    const res = await request(ctx.baseUrl, "POST", "/nexus/quality-gate", {
+      body: {
+        githubRepositoryId: 5055,
+        githubPrId: 505505,
+        commitSha: "fc-sha",
+        status: "ERROR",
+        failedConditions: null,
+      },
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.deepStrictEqual(res.json.task.failedConditions, []);
+
+    const stored = await QualityGate.findOne({ branchId: branch.id }).lean();
+    assert.deepStrictEqual(stored.failedConditions, []);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("GET branch quality-gate and comments endpoints", async () => {
   const branch = await Branch.create({
     taskId: "T-GET",
