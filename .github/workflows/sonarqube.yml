@@ -24,35 +24,317 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ---------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      # ---------------------------------------------------------
+      # 2. Setup Node.js
+      # ---------------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
 
+      # ---------------------------------------------------------
+      # 3. Install dependencies
+      # ---------------------------------------------------------
       - name: Install dependencies
         run: npm ci
 
+      # ---------------------------------------------------------
+      # 4. Run tests with coverage
+      # ---------------------------------------------------------
       - name: Run tests with coverage
         run: npm run test
 
+      # ---------------------------------------------------------
+      # 5. Setup Java 21
+      #
+      # Required when disabling SonarQube JRE provisioning.
+      # ---------------------------------------------------------
+      - name: Setup Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # ---------------------------------------------------------
+      # 6. Run SonarQube Scan
+      # ---------------------------------------------------------
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v7
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           args: >
-            -Dsonar.branch.name=${{ github.head_ref || github.ref_name }}
-
-      - name: SonarQube Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        timeout-minutes: 5
+            -Dsonar.scanner.skipJreProvisioning=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # ---------------------------------------------------------
+      # 7. Read SonarQube report-task.txt
+      #
+      # This gives us:
+      # - ceTaskId
+      # - projectKey
+      # - serverUrl
+      # ---------------------------------------------------------
+      - name: Read SonarQube Task Information
+        id: sonar-task
+        shell: bash
+        run: |
+          echo "========== SonarQube report-task.txt =========="
+
+          cat .scannerwork/report-task.txt
+
+          CE_TASK_ID=$(grep '^ceTaskId=' .scannerwork/report-task.txt | cut -d'=' -f2)
+          PROJECT_KEY=$(grep '^projectKey=' .scannerwork/report-task.txt | cut -d'=' -f2)
+          SERVER_URL=$(grep '^serverUrl=' .scannerwork/report-task.txt | cut -d'=' -f2)
+
+          echo ""
+          echo "CE Task ID: $CE_TASK_ID"
+          echo "Project Key: $PROJECT_KEY"
+          echo "Server URL: $SERVER_URL"
+
+          echo "ce_task_id=$CE_TASK_ID" >> "$GITHUB_OUTPUT"
+          echo "project_key=$PROJECT_KEY" >> "$GITHUB_OUTPUT"
+          echo "server_url=$SERVER_URL" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------
+      # 8. Wait for SonarQube analysis
+      #
+      # Sonar scanner submits the analysis asynchronously.
+      # We wait until the Compute Engine task finishes.
+      # ---------------------------------------------------------
+      - name: Wait for SonarQube Analysis
+        id: sonar-analysis
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          CE_TASK_ID: ${{ steps.sonar-task.outputs.ce_task_id }}
+        run: |
+          echo "Waiting for SonarQube analysis..."
+          echo "CE Task ID: $CE_TASK_ID"
+
+          for i in {1..60}; do
+
+            RESPONSE=$(curl -s \
+              -u "$SONAR_TOKEN:" \
+              "$SONAR_HOST_URL/api/ce/task?id=$CE_TASK_ID")
+
+            STATUS=$(echo "$RESPONSE" | jq -r '.task.status')
+
+            echo "Attempt $i/60 - SonarQube status: $STATUS"
+
+            if [ "$STATUS" = "SUCCESS" ]; then
+
+              ANALYSIS_ID=$(echo "$RESPONSE" | jq -r '.task.analysisId')
+
+              echo ""
+              echo "SonarQube analysis completed successfully."
+              echo "Analysis ID: $ANALYSIS_ID"
+
+              echo "analysis_id=$ANALYSIS_ID" >> "$GITHUB_OUTPUT"
+
+              exit 0
+            fi
+
+            if [ "$STATUS" = "FAILED" ]; then
+              echo ""
+              echo "SonarQube analysis FAILED"
+              echo "$RESPONSE" | jq .
+
+              exit 1
+            fi
+
+            if [ "$STATUS" = "CANCELED" ]; then
+              echo ""
+              echo "SonarQube analysis was CANCELED"
+              echo "$RESPONSE" | jq .
+
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          echo "Timed out waiting for SonarQube analysis."
+          exit 1
+
+      # ---------------------------------------------------------
+      # 9. Get Quality Gate for THIS analysis
+      #
+      # IMPORTANT:
+      # We use analysisId instead of projectKey.
+      #
+      # This prevents mixing results when multiple PRs are
+      # being analyzed at the same time.
+      # ---------------------------------------------------------
+      - name: Get SonarQube Quality Gate
+        id: quality-gate
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          ANALYSIS_ID: ${{ steps.sonar-analysis.outputs.analysis_id }}
+        run: |
+
+          echo "Getting Quality Gate..."
+          echo "Analysis ID: $ANALYSIS_ID"
+
+          RESPONSE=$(curl -s \
+            -u "$SONAR_TOKEN:" \
+            "$SONAR_HOST_URL/api/qualitygates/project_status?analysisId=$ANALYSIS_ID")
+
+          echo ""
+          echo "========== Quality Gate Response =========="
+          echo "$RESPONSE" | jq .
+
+          STATUS=$(echo "$RESPONSE" | jq -r '.projectStatus.status')
+
+          echo ""
+          echo "Quality Gate Status: $STATUS"
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+          FAILED_CONDITIONS=$(echo "$RESPONSE" | jq -c '
+            [
+              .projectStatus.conditions[]
+              | select(.status == "ERROR")
+              | {
+                  metric: .metricKey,
+                  actualValue: (.actualValue // null),
+                  threshold: (.errorThreshold // null),
+                  operator: (.comparator // null)
+                }
+            ]
+          ')
+
+          echo ""
+          echo "Failed Conditions:"
+          echo "$FAILED_CONDITIONS" | jq .
+
+          echo "failed_conditions=$FAILED_CONDITIONS" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------
+      # 10. Send GitHub + Sonar information to Nexus
+      #
+      # THIS IS THE IMPORTANT PART FOR CORRELATION.
+      #
+      # GitHub gives:
+      # - repository
+      # - PR ID
+      # - PR number
+      # - branch
+      # - commit SHA
+      #
+      # Sonar gives:
+      # - CE Task ID
+      # - Analysis ID
+      # - Quality Gate
+      # - Failed conditions
+      # ---------------------------------------------------------
+      - name: Send Quality Gate Result to Nexus
+        if: always()
+        shell: bash
+        env:
+          NEXUS_WEBHOOK_URL: ${{ secrets.NEXUS_WEBHOOK_URL }}
+
+          QUALITY_STATUS: ${{ steps.quality-gate.outputs.status }}
+          FAILED_CONDITIONS: ${{ steps.quality-gate.outputs.failed_conditions }}
+
+          CE_TASK_ID: ${{ steps.sonar-task.outputs.ce_task_id }}
+          SONAR_PROJECT_KEY: ${{ steps.sonar-task.outputs.project_key }}
+          SONAR_ANALYSIS_ID: ${{ steps.sonar-analysis.outputs.analysis_id }}
+
+        run: |
+
+          echo "Preparing Nexus payload..."
+
+          jq -n \
+            --argjson repositoryId "${{ github.event.repository.id }}" \
+            --argjson prId "${{ github.event.pull_request.id || 0 }}" \
+            --argjson prNumber "${{ github.event.pull_request.number || 0 }}" \
+            --arg branch "${{ github.event.pull_request.head.ref || github.ref_name }}" \
+            --arg commitSha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --arg eventName "${{ github.event_name }}" \
+            --arg repository "${{ github.repository }}" \
+            --arg sonarProjectKey "$SONAR_PROJECT_KEY" \
+            --arg sonarTaskId "$CE_TASK_ID" \
+            --arg sonarAnalysisId "$SONAR_ANALYSIS_ID" \
+            --arg status "$QUALITY_STATUS" \
+            --argjson failedConditions "${FAILED_CONDITIONS:-[]}" \
+            '{
+              githubRepositoryId: $repositoryId,
+              githubRepository: $repository,
+
+              githubPrId: (
+                if $prId == 0 then null else $prId end
+              ),
+
+              githubPrNumber: (
+                if $prNumber == 0 then null else $prNumber end
+              ),
+
+              branchName: $branch,
+              commitSha: $commitSha,
+              eventName: $eventName,
+
+              sonarProjectKey: $sonarProjectKey,
+              sonarTaskId: $sonarTaskId,
+              sonarAnalysisId: $sonarAnalysisId,
+
+              status: $status,
+              failedConditions: $failedConditions
+            }' > nexus-quality-gate.json
+
+          echo ""
+          echo "========== Nexus Payload =========="
+          cat nexus-quality-gate.json | jq .
+
+          echo ""
+          echo "Sending result to Nexus..."
+
+          HTTP_STATUS=$(curl \
+            -s \
+            -o nexus-response.json \
+            -w "%{http_code}" \
+            -X POST \
+            "$NEXUS_WEBHOOK_URL/nexus/quality-gate" \
+            -H "Content-Type: application/json" \
+            --data-binary @nexus-quality-gate.json)
+
+          echo ""
+          echo "Nexus HTTP Status: $HTTP_STATUS"
+
+          echo "========== Nexus Response =========="
+          cat nexus-response.json || true
+
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "Failed to send Quality Gate result to Nexus."
+            exit 1
+          fi
+
+      # ---------------------------------------------------------
+      # 11. Fail GitHub workflow if Quality Gate failed
+      #
+      # The Nexus notification above has already happened because
+      # it uses if: always().
+      # ---------------------------------------------------------
+      - name: Enforce SonarQube Quality Gate
+        if: steps.quality-gate.outputs.status != 'OK'
+        shell: bash
+        run: |
+          echo "SonarQube Quality Gate FAILED."
+          echo "Status: ${{ steps.quality-gate.outputs.status }}"
+          echo ""
+          echo "Failed Conditions:"
+          echo '${{ steps.quality-gate.outputs.failed_conditions }}' | jq .
+
+          exit 1
