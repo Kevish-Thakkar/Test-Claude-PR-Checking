@@ -45,7 +45,7 @@ jobs:
       # 3. Install dependencies
       # ---------------------------------------------------------
       - name: Install dependencies
-        run: npm i
+        run: npm ci
 
       # ---------------------------------------------------------
       # 4. Run tests with coverage
