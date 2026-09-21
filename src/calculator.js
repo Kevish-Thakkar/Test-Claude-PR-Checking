@@ -21,10 +21,15 @@ function subtract(a, b) {
   return a - b;
 }
 
+function additionOfThreeNumbers(a, b, c) {
+  return a + b + c;
+}
+
 module.exports = {
   add,
   divide,
   multiply,
   power,
   subtract,
+  additionOfThreeNumbers,
 };
