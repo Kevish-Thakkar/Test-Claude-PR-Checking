@@ -540,6 +540,53 @@ test("POST /nexus/quality-gate validates, 404s, and correlates by PR and SHA", a
   }
 });
 
+test("POST /nexus/quality-gate defaults empty status to ERROR", async () => {
+  const branch = await Branch.create({
+    taskId: "T-EMPTY",
+    githubRepositoryId: 4044,
+    owner: "o",
+    repo: "r",
+    branchName: "feature/empty-status",
+    headSha: "empty-status-sha",
+  });
+  await PullRequest.create({
+    githubRepositoryId: 4044,
+    githubPrId: 404404,
+    githubPrNumber: 44,
+    taskId: branch.taskId,
+    branchId: branch.id,
+    branchName: branch.branchName,
+    headSha: "empty-status-sha",
+  });
+
+  const ctx = await startTestServer(app);
+  try {
+    const res = await request(ctx.baseUrl, "POST", "/nexus/quality-gate", {
+      body: {
+        githubRepositoryId: 4044,
+        githubPrId: 404404,
+        commitSha: "empty-status-sha",
+        sonarProjectKey: "",
+        sonarTaskId: "",
+        sonarAnalysisId: "",
+        status: "",
+        failedConditions: [],
+      },
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.json.task.status, "ERROR");
+    assert.strictEqual(res.json.task.passed, false);
+    assert.strictEqual(res.json.task.failed, true);
+
+    const stored = await QualityGate.findOne({ branchId: branch.id }).lean();
+    assert.strictEqual(stored.status, "ERROR");
+    assert.strictEqual(stored.sonarProjectKey, null);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("GET branch quality-gate and comments endpoints", async () => {
   const branch = await Branch.create({
     taskId: "T-GET",

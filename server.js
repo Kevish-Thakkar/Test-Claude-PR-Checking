@@ -2329,7 +2329,20 @@ app.post(
 
       console.log("Branch:", branch.branchName);
 
-      const passed = status === "OK";
+      // CI may post empty status when earlier Sonar steps fail (if: always()).
+      // Treat blank/missing as ERROR so Mongo validation succeeds and the branch is marked failed.
+      const normalizedStatus =
+        typeof status === "string" && status.trim() !== ""
+          ? status.trim()
+          : "ERROR";
+
+      if (normalizedStatus !== status) {
+        console.log(
+          "⚠️ Quality Gate status missing/empty — defaulting to ERROR",
+        );
+      }
+
+      const passed = normalizedStatus === "OK";
 
       const qualityReport = await QualityGate.create({
         taskId: branch.taskId,
@@ -2341,10 +2354,12 @@ app.post(
         sonarProjectKey: sonarProjectKey || null,
         sonarAnalysisId: sonarAnalysisId || null,
         sonarTaskId: sonarTaskId || null,
-        status,
+        status: normalizedStatus,
         passed,
         failed: !passed,
-        failedConditions,
+        failedConditions: Array.isArray(failedConditions)
+          ? failedConditions
+          : [],
         source: "ci",
       });
 
@@ -2368,13 +2383,15 @@ app.post(
 
           commitSha: sha,
 
-          status,
+          status: normalizedStatus,
 
           passed,
 
           failed: !passed,
 
-          failedConditions,
+          failedConditions: Array.isArray(failedConditions)
+            ? failedConditions
+            : [],
 
           latestQualityGatePassed: branch.latestQualityGatePassed,
         },

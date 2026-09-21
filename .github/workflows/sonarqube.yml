@@ -257,6 +257,17 @@ jobs:
 
           echo "Preparing Nexus payload..."
 
+          # When earlier Sonar steps fail, GitHub outputs are empty.
+          # Default so Nexus always receives a valid Quality Gate status.
+          if [ -z "$QUALITY_STATUS" ] || [ "$QUALITY_STATUS" = "null" ]; then
+            QUALITY_STATUS="ERROR"
+            echo "⚠️ QUALITY_STATUS was empty — defaulting to ERROR"
+          fi
+
+          if [ -z "$FAILED_CONDITIONS" ] || [ "$FAILED_CONDITIONS" = "null" ]; then
+            FAILED_CONDITIONS="[]"
+          fi
+
           jq -n \
             --argjson repositoryId "${{ github.event.repository.id }}" \
             --argjson prId "${{ github.event.pull_request.id || 0 }}" \
@@ -265,11 +276,11 @@ jobs:
             --arg commitSha "${{ github.event.pull_request.head.sha || github.sha }}" \
             --arg eventName "${{ github.event_name }}" \
             --arg repository "${{ github.repository }}" \
-            --arg sonarProjectKey "$SONAR_PROJECT_KEY" \
-            --arg sonarTaskId "$CE_TASK_ID" \
-            --arg sonarAnalysisId "$SONAR_ANALYSIS_ID" \
+            --arg sonarProjectKey "${SONAR_PROJECT_KEY:-}" \
+            --arg sonarTaskId "${CE_TASK_ID:-}" \
+            --arg sonarAnalysisId "${SONAR_ANALYSIS_ID:-}" \
             --arg status "$QUALITY_STATUS" \
-            --argjson failedConditions "${FAILED_CONDITIONS:-[]}" \
+            --argjson failedConditions "$FAILED_CONDITIONS" \
             '{
               githubRepositoryId: $repositoryId,
               githubRepository: $repository,
@@ -286,9 +297,9 @@ jobs:
               commitSha: $commitSha,
               eventName: $eventName,
 
-              sonarProjectKey: $sonarProjectKey,
-              sonarTaskId: $sonarTaskId,
-              sonarAnalysisId: $sonarAnalysisId,
+              sonarProjectKey: (if $sonarProjectKey == "" then null else $sonarProjectKey end),
+              sonarTaskId: (if $sonarTaskId == "" then null else $sonarTaskId end),
+              sonarAnalysisId: (if $sonarAnalysisId == "" then null else $sonarAnalysisId end),
 
               status: $status,
               failedConditions: $failedConditions
