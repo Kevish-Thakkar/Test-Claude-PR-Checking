@@ -15,11 +15,16 @@ function power(a, b) {
 }
 // console.log(user.id);
 
-console.log(user.id);
+// console.log(user.id);
+
+function subtract(a, b) {
+  return a - b;
+}
 
 module.exports = {
   add,
   divide,
   multiply,
   power,
+  subtract,
 };
