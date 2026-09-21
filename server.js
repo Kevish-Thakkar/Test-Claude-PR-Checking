@@ -1196,16 +1196,6 @@ const app = express();
 |--------------------------------------------------------------------------
 */
 
-const PORT = process.env.PORT || 3000;
-
-const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
-
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-
-const SONAR_URL = process.env.SONAR_URL || "http://localhost:9000";
-
-const SONAR_TOKEN = process.env.SONAR_TOKEN;
-
 /*
 |--------------------------------------------------------------------------
 | Temporary In-Memory Storage
@@ -1247,7 +1237,9 @@ function generateId() {
 */
 
 function verifyGitHubSignature(payload, signature) {
-  if (!GITHUB_WEBHOOK_SECRET) {
+  const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
     console.log("❌ GITHUB_WEBHOOK_SECRET is not configured");
 
     return false;
@@ -1262,7 +1254,7 @@ function verifyGitHubSignature(payload, signature) {
   const expectedSignature =
     "sha256=" +
     crypto
-      .createHmac("sha256", GITHUB_WEBHOOK_SECRET)
+      .createHmac("sha256", webhookSecret)
       .update(payload)
       .digest("hex");
 
@@ -1283,7 +1275,9 @@ function verifyGitHubSignature(payload, signature) {
 */
 
 async function githubRequest(url, options = {}) {
-  if (!GITHUB_TOKEN) {
+  const githubToken = process.env.GITHUB_TOKEN;
+
+  if (!githubToken) {
     throw new Error("GITHUB_TOKEN is not configured");
   }
 
@@ -1291,7 +1285,7 @@ async function githubRequest(url, options = {}) {
     ...options,
 
     headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Authorization: `Bearer ${githubToken}`,
 
       Accept: "application/vnd.github+json",
 
@@ -1329,15 +1323,18 @@ async function githubRequest(url, options = {}) {
  */
 
 async function getSonarQualityGate(projectKey) {
-  if (!SONAR_TOKEN) {
+  const sonarToken = process.env.SONAR_TOKEN;
+  const sonarUrl = process.env.SONAR_URL || "http://localhost:9000";
+
+  if (!sonarToken) {
     throw new Error("SONAR_TOKEN is not configured");
   }
 
   const url =
-    `${SONAR_URL}/api/qualitygates/project_status` +
+    `${sonarUrl}/api/qualitygates/project_status` +
     `?projectKey=${encodeURIComponent(projectKey)}`;
 
-  const auth = Buffer.from(`${SONAR_TOKEN}:`).toString("base64");
+  const auth = Buffer.from(`${sonarToken}:`).toString("base64");
 
   const response = await fetch(url, {
     method: "GET",
@@ -2102,7 +2099,7 @@ app.post(
         });
       }
 
-      if (!GITHUB_TOKEN) {
+      if (!process.env.GITHUB_TOKEN) {
         return res.status(500).json({
           success: false,
 
@@ -2490,13 +2487,13 @@ app.get("/", (req, res) => {
 
     service: "Nexus GitHub + SonarQube Gateway",
 
-    sonarUrl: SONAR_URL,
+    sonarUrl: process.env.SONAR_URL || "http://localhost:9000",
 
-    githubWebhookConfigured: Boolean(GITHUB_WEBHOOK_SECRET),
+    githubWebhookConfigured: Boolean(process.env.GITHUB_WEBHOOK_SECRET),
 
-    githubTokenConfigured: Boolean(GITHUB_TOKEN),
+    githubTokenConfigured: Boolean(process.env.GITHUB_TOKEN),
 
-    sonarTokenConfigured: Boolean(SONAR_TOKEN),
+    sonarTokenConfigured: Boolean(process.env.SONAR_TOKEN),
   });
 });
 
@@ -2506,14 +2503,75 @@ app.get("/", (req, res) => {
 |--------------------------------------------------------------------------
 */
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+function resolveListenPort(port) {
+  if (port !== undefined) {
+    return port;
+  }
 
-  console.log("GitHub webhook secret:", Boolean(GITHUB_WEBHOOK_SECRET));
+  if (process.env.PORT !== undefined && process.env.PORT !== "") {
+    return Number(process.env.PORT);
+  }
 
-  console.log("GitHub token:", Boolean(GITHUB_TOKEN));
+  return 3000;
+}
 
-  console.log("SonarQube URL:", SONAR_URL);
+function startServer(port) {
+  const resolvedPort = resolveListenPort(port);
 
-  console.log("SonarQube token:", Boolean(SONAR_TOKEN));
-});
+  const server = app.listen(resolvedPort, () => {
+    const boundPort = server.address().port;
+
+    console.log(`🚀 Server running on http://localhost:${boundPort}`);
+
+    console.log(
+      "GitHub webhook secret:",
+      Boolean(process.env.GITHUB_WEBHOOK_SECRET),
+    );
+
+    console.log("GitHub token:", Boolean(process.env.GITHUB_TOKEN));
+
+    console.log(
+      "SonarQube URL:",
+      process.env.SONAR_URL || "http://localhost:9000",
+    );
+
+    console.log("SonarQube token:", Boolean(process.env.SONAR_TOKEN));
+  });
+
+  return server;
+}
+
+function resetStores() {
+  nexusBranches.length = 0;
+  githubPullRequests.length = 0;
+  claudeComments.length = 0;
+  claudeReviews.length = 0;
+  sonarReports.length = 0;
+}
+
+module.exports = {
+  app,
+  startServer,
+  resolveListenPort,
+  resetStores,
+  generateId,
+  verifyGitHubSignature,
+  githubRequest,
+  getSonarQualityGate,
+  extractFailedConditions,
+  handlePullRequest,
+  handleReviewComment,
+  handlePullRequestReview,
+  handleIssueComment,
+  nexusBranches,
+  githubPullRequests,
+  claudeComments,
+  claudeReviews,
+  sonarReports,
+};
+
+/* c8 ignore start */
+if (require.main === module) {
+  startServer();
+}
+/* c8 ignore stop */

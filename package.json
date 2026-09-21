@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --experimental-test-coverage"
+    "test": "c8 --exclude=\"test/**\" --exclude=\"coverage/**\" --reporter=text --reporter=lcov --check-coverage --lines 99 --functions 99 --branches 99 --statements 99 node --test ./test/calculator.test.js ./test/server.helpers.test.js ./test/server.routes.test.js"
   },
   "repository": {
     "type": "git",
@@ -21,5 +21,8 @@
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "c8": "^12.0.0"
   }
 }
