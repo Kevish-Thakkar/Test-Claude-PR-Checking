@@ -13,6 +13,7 @@ function multiply(a, b) {
 function power(a, b) {
   return Math.pow(a, b);
 }
+// console.log(user.id);
 
 console.log(user.id);
 
